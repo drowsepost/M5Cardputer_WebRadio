@@ -329,20 +329,30 @@ void Playfile() {
 }
 
 
+bool isMuted = false;
+uint16_t prevVolume = 0;
+
 void volumeUp() {
-  curVolume = std::min(static_cast<uint16_t>(curVolume + 10), static_cast<uint16_t>(255));
-  if (curVolume > 255) curVolume = 255;
-  requestChangeVolume = true;
+  if(isMuted) {
+    prevVolume = min(prevVolume + 10, 200);
+    if (prevVolume > 200) prevVolume = 200;
+  } else {
+    curVolume = min(curVolume + 10, 200);
+    if (curVolume > 200) curVolume = 200;
+    requestChangeVolume = true;
+  }
 }
 
 void volumeDown() {
-  curVolume = std::max(static_cast<uint16_t>(curVolume - 10), static_cast<uint16_t>(0));
-  if (curVolume <= 0) curVolume = 0;
-  requestChangeVolume = true;
+  if(isMuted) {
+    prevVolume = max(prevVolume - 10, 0);
+    if (prevVolume < 1) prevVolume = 1;
+  } else {
+    curVolume = max(curVolume - 10, 0);
+    if (curVolume < 1) curVolume = 1;
+    requestChangeVolume = true;
+  }
 }
-
-bool isMuted = false;
-uint16_t prevVolume = 0;
 
 void volumeMute() {
   if (!isMuted) {
@@ -358,7 +368,7 @@ void volumeMute() {
 
 void showVolume() {
   static uint8_t lastVolume = 0; // Rastrear o último volume
-  uint8_t currentVolume = curVolume; // Usar variável global
+  uint8_t currentVolume = (isMuted)? prevVolume : curVolume; // Usar variável global
 
   if (currentVolume != lastVolume) {
     lastVolume = currentVolume;
@@ -406,7 +416,7 @@ void setup() {
   M5Cardputer.Speaker.begin();
 
   audio.setPinout(I2S_BCK, I2S_WS, I2S_DOUT);
-  audio.setVolume(map(curVolume, 0, 255, 0, 21));
+  audio.setVolume((uint8_t)map(curVolume, 0, 200, 0, 20));
   audio.setBalance(0);
   audio.setBufferSize(8*1024);
   //audio.setAudioTaskCore(0);
@@ -483,7 +493,7 @@ void Task_Audio(void *pvParameters) {
   while (1) {
     if(requestChangeVolume) {
       requestChangeVolume = false;
-      audio.setVolume(map(curVolume, 0, 255, 0, 21));
+      audio.setVolume(map(curVolume, 0, 200, 0, 20));
     }
     if(requestStop) {
       requestStop = false;
