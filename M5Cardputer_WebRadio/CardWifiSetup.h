@@ -4,7 +4,7 @@
  * @brief https://github.com/cyberwisk/M5Card_Wifi_KeyBoard_Setup
  * @version Beta 1.1
  * @date 2024-02-18
- * @modificado 1015-05-25
+ * @modificado 2025-09-28
  *
  * @Hardwares: M5Cardputer - https://docs.m5stack.com/en/core/Cardputer
  * @Dependent Librarys:
@@ -19,7 +19,7 @@
 #include <vector>
 
 // Definições de constantes
-#define NVS_NAMESPACE "M5_settings"
+#define NVS_NAMESPACE "Radio_settings"
 #define NVS_SSID_KEY "wifi_ssid"
 #define NVS_PASS_KEY "wifi_pass"
 #define WIFI_TIMEOUT 20000  // 20 segundos
@@ -91,7 +91,7 @@ String inputText(const String& prompt, int x, int y, bool isPassword = false) {
 void displayWiFiInfo() {
     M5Cardputer.Display.fillRect(0, 20, 240, 135, BLACK);
     M5Cardputer.Display.setCursor(1, 1);
-    M5Cardputer.Display.drawString("WiFi conectado", 35, 1);
+    M5Cardputer.Display.drawString("WiFi connected        ", 1, 1);
     M5Cardputer.Display.drawString("SSID: " + WiFi.SSID(), 1, 18);
     M5Cardputer.Display.drawString("IP: " + WiFi.localIP().toString(), 1, 33);
     int8_t rssi = WiFi.RSSI();
@@ -117,7 +117,7 @@ String scanAndDisplayNetworks() {
     WiFi.scanNetworks(true);
     
     M5Cardputer.Display.clear();
-    M5Cardputer.Display.drawString("Procurando redes...", 1, 1);
+    M5Cardputer.Display.drawString("Looking for networks...", 1, 1);
     
     // Aguarda resultado do scan
     int16_t scanResult;
@@ -127,7 +127,7 @@ String scanAndDisplayNetworks() {
     } while(scanResult == WIFI_SCAN_RUNNING);
     
     if (scanResult == 0) {
-        M5Cardputer.Display.drawString("Nenhuma rede encontrada.", 1, 15);
+        M5Cardputer.Display.drawString("No networks found.", 1, 15);
         delay(2000);
         return "";
     }
@@ -151,7 +151,7 @@ String scanAndDisplayNetworks() {
              });
     
     M5Cardputer.Display.clear();
-    M5Cardputer.Display.drawString("Redes disponiveis:", 1, 1);
+    M5Cardputer.Display.drawString("Available networks:", 1, 1);
     
     int selectedNetwork = 0;
     while (true) {
@@ -166,7 +166,7 @@ String scanAndDisplayNetworks() {
                                          1, 18 + i * 18);
         }
         
-        M5Cardputer.Display.drawString("Selecionar ENTER:OK", 1, 108);
+        M5Cardputer.Display.drawString("Select ENTER:OK", 1, 108);
         M5Cardputer.update();
         
         if (M5Cardputer.Keyboard.isChange()) {
@@ -185,7 +185,7 @@ String scanAndDisplayNetworks() {
                 }
             }
         }
-        delay(10);
+        M5.delay(20);
     }
 }
 
@@ -211,7 +211,7 @@ void connectToWiFi() {
         WiFi.begin(CFG_WIFI_SSID.c_str(), CFG_WIFI_PASS.c_str());
         
         unsigned long startTime = millis();
-        M5Cardputer.Display.print("Conectando");
+        M5Cardputer.Display.print("Connecting");
         
         while (millis() - startTime < WIFI_TIMEOUT) {
             M5Cardputer.update();
@@ -222,13 +222,14 @@ void connectToWiFi() {
                 preferences.clear();
                 preferences.end();
                 M5Cardputer.Display.clear();
-                M5Cardputer.Display.drawString("Memoria apagada.", 1, 60);
+                M5Cardputer.Display.drawString("Memory off.", 1, 60);
                 delay(1000);
                 ESP.restart();
                 return;
             }
             
             if (WiFi.status() == WL_CONNECTED) {
+                delay(1000);
                 displayWiFiInfo();
                 return;
             }
@@ -240,7 +241,7 @@ void connectToWiFi() {
     
     // Se não conectou, inicia processo de configuração
     M5Cardputer.Display.clear();
-    M5Cardputer.Display.drawString("Configuracao WiFi", 1, 1);
+    M5Cardputer.Display.drawString("WiFi Configuration", 1, 1);
     
     CFG_WIFI_SSID = scanAndDisplayNetworks();
     if (CFG_WIFI_SSID.isEmpty()) {
@@ -249,7 +250,7 @@ void connectToWiFi() {
     
     M5Cardputer.Display.clear();
     M5Cardputer.Display.drawString("SSID: " + CFG_WIFI_SSID, 1, 20);
-    M5Cardputer.Display.drawString("Digite a senha:", 1, 38);
+    M5Cardputer.Display.drawString("Enter password:", 1, 38);
     CFG_WIFI_PASS = inputText("> ", 4, M5Cardputer.Display.height() - 24, true);
     
     // Salva credenciais com hash
@@ -261,7 +262,7 @@ void connectToWiFi() {
     preferences.end();
     
     M5Cardputer.Display.clear();
-    M5Cardputer.Display.drawString("Credenciais salvas.", 1, 60);
+    M5Cardputer.Display.drawString("Saved credentials.", 1, 60);
     
     WiFi.begin(CFG_WIFI_SSID.c_str(), CFG_WIFI_PASS.c_str());
     delay(300);
