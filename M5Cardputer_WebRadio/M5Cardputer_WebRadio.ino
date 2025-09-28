@@ -2,24 +2,23 @@
  * @file M5Cardputer_WebRadio.ino
  * @author Aurélio Avanzi
  * @brief https://github.com/cyberwisk/M5Cardputer_WebRadio
- * @version Beta 1.1
- * @date 2023-12-12
+ * @version Beta 1.1 custom DP
+ * @date 2025-09-28
  *
- * @Hardwares: M5Cardputer
- * @Platform Version: Arduino M5Stack Board Manager v2.0.7
+ * @Hardwares: M5Cardputer ADV
+ * @Platform Version: Arduino M5Stack Board Manager v2.3.6
  * @Dependent Library:
  * M5GFX: https://github.com/m5stack/M5GFX
  * M5Unified: https://github.com/m5stack/M5Unified
  * M5Cardputer: https://github.com/m5stack/M5Cardputer
  * Preferences: https://github.com/espressif/arduino-esp32/tree/master/libraries/Preferences
+ * ESP32-audioI2S version 3.2.1: https://github.com/schreibfaul1/ESP32-audioI2S
  **/
 
 //Display: Tela TFT de 1.14 polegadas com resolução de 135x240 pixels.
 #include "M5Cardputer.h"
 #include "CardWifiSetup.h"
 #include <Audio.h> //ESP32-audioI2S vesão 
-#include <Adafruit_NeoPixel.h>
-Adafruit_NeoPixel led(1, 21, NEO_GRB + NEO_KHZ800);
 
 #define MAX_STATIONS 20
 #define MAX_NAME_LENGTH 30
@@ -27,6 +26,8 @@ Adafruit_NeoPixel led(1, 21, NEO_GRB + NEO_KHZ800);
 #define I2S_BCK 41
 #define I2S_WS 43
 #define I2S_DOUT 42
+
+#define BAT_ADC_PIN 10
 
 // FFT Constants
 #define FFT_SIZE 256
@@ -37,7 +38,19 @@ static int header_height = 51; // Altura do FFT
 static bool fft_enabled = false;  // Flag para habilitar/desabilitar FFT
 static bool fftSimON = true; //Liga a simulação do FFT
 
+bool requestStop = false;
+bool requestReconnect = false;
+bool requestChangeVolume = false;
+
+String g_stationName;
+String g_streamTitle;
+String g_id3Title;
+SemaphoreHandle_t g_mutex;
+bool infoChanged = false;
+
 Audio audio;
+// Task handle for audio task
+TaskHandle_t handleAudioTask = NULL;
 
 //const long interval = 100;
 unsigned long lastUpdate = 0;
@@ -102,12 +115,41 @@ const PROGMEM RadioStation defaultStations[] = {
 
 RadioStation stations[MAX_STATIONS];
 size_t numStations = 0;
-size_t curStation = 3; //qual radio iniciar
-uint16_t curVolume = 115;
+size_t curStation = 0; //qual radio iniciar
+uint16_t curVolume = 40;
 
 // Controle de debounce
 unsigned long lastButtonPress = 0;
 const unsigned long DEBOUNCE_DELAY = 200;
+
+bool isAudioPlay = false;
+
+
+// get Battery voltage from ADC
+// @return {float} voltage(Volt)
+float getBattVoltage() {
+  analogSetPinAttenuation(BAT_ADC_PIN, ADC_11db);
+  uint32_t mv = analogReadMilliVolts(BAT_ADC_PIN);
+  return (mv * 2) / 1000.0f;
+}
+
+// change Battery Level
+uint8_t getBattLevel(float v) {
+  if (v >= 4.12f) return 100;
+  if (v >= 3.88f) return 75;
+  if (v >= 3.61f) return 50;
+  if (v >= 3.40f) return 25;
+  return 0;
+}
+
+// Battery Level wrapper
+uint8_t getBatteryLevel() {
+  if(M5.getBoard() == m5::board_t::board_M5CardputerADV){
+    return getBattLevel(getBattVoltage());
+  } else {
+    return M5.Power.getBatteryLevel();
+  }
+}
 
 // Funções FFT
 void setupFFT() {
@@ -192,8 +234,7 @@ void updateBatteryDisplay(unsigned long updateInterval) {
 
   if (millis() - lastUpdate >= updateInterval) {
     lastUpdate = millis();
-    
-    int batteryLevel = M5.Power.getBatteryLevel();
+    int32_t batteryLevel = getBatteryLevel();
     uint16_t batteryColor = batteryLevel < 30 ? TFT_RED : TFT_GREEN;
 
     M5Cardputer.Display.fillRect(215, 5, 40, 12, TFT_BLACK); 
@@ -201,18 +242,6 @@ void updateBatteryDisplay(unsigned long updateInterval) {
     M5Cardputer.Display.fillRect(215, 5, 20, 10, TFT_DARKGREY);
     M5Cardputer.Display.fillRect(235, 7, 3, 6, TFT_DARKGREY);
     M5Cardputer.Display.fillRect(217, 7, (batteryLevel * 16) / 100, 6, batteryColor);
-    
-    //M5Cardputer.Display.drawString(batteryLevel,215 + 10,5 + 5,&fonts::Font0);
-    
-    //char percentageStr[4];
-    //snprintf(percentageStr, sizeof(percentageStr), "%d%%", batteryLevel);
-
-    //M5Cardputer.Display.setTextColor(TFT_BLACK);
-    //M5Cardputer.Display.setTextDatum(MC_DATUM);
-    //M5Cardputer.Display.drawString(percentageStr,215 + 10,5 + 5,&fonts::Font0);
-    //M5Cardputer.Display.drawString("Fonte maior", 10, 40, 2);
-    // Restaura a fonte original
-    //M5Cardputer.Display.setFont(&fonts::FreeMonoOblique9pt7b);
   }
 }
 
@@ -223,10 +252,8 @@ void loadDefaultStations() {
 
 void mergeRadioStations() {
   if (!SD.begin()) {
-    led.setPixelColor(0, led.Color(255, 0, 0));
-    led.show();
-    M5Cardputer.Display.drawString("/station_list.txt ", 20, 30);
-    M5Cardputer.Display.drawString("NAO Encontrado no SD", 20, 50);
+    M5Cardputer.Display.drawString("/station_list.txt ", 8, 30);
+    M5Cardputer.Display.drawString("NOT Found on SD", 8, 50);
     delay(4000);
     loadDefaultStations();
     M5Cardputer.Display.fillScreen(BLACK);
@@ -267,8 +294,6 @@ void mergeRadioStations() {
   if (numStations == 0) {
     loadDefaultStations();
   }
-    led.setPixelColor(0, led.Color(0, 0, 0));
-    led.show();
 }
 
 void showStation() {
@@ -278,48 +303,46 @@ void showStation() {
   showVolume();
 }
 
-void audio_id3data(const char *info){M5Cardputer.Display.drawString(info, 0, 33);}
 
 void Playfile() {
-  led.setPixelColor(0, led.Color(255, 0, 0));
-  led.show();
+  isAudioPlay = false;
   audio.stopSong();
     
-    String url = stations[curStation].url; // Armazena a URL para facilitar o acesso
-    
-    if (url.indexOf("http") != -1) { 
-        audio.connecttohost(stations[curStation].url);
-    } 
-    else if (url.indexOf("/mp3") != -1) {
-        M5Cardputer.Display.drawString("Play MP3 no SD /mp3    ", 0, 15);
-        delay(4000);
-        audio.connecttoFS(SD,stations[curStation].url);
-    } 
-    else {
-        audio.connecttospeech("Trabalhe em quanto os outros dormem, e você ficará com sono durante o dia.", "pt");
-    }
-  showStation();
+  String url = stations[curStation].url; // Armazena a URL para facilitar o acesso
+  if (xSemaphoreTake(g_mutex, portMAX_DELAY) == pdTRUE) {
+      g_stationName = stations[curStation].name;
+      g_streamTitle = "";
+      g_id3Title = "";
+      infoChanged = true;
+      xSemaphoreGive(g_mutex);
+  }
+  
+  vTaskDelay(20 / portTICK_PERIOD_MS);
+  
+  if (url.indexOf("http") != -1) { 
+    audio.connecttohost(stations[curStation].url);
+    isAudioPlay = true;
+  } else if (url.indexOf("/mp3") != -1) {
+    audio.connecttoFS(SD,stations[curStation].url);
+    isAudioPlay = true;
+  }
 }
 
 
 void volumeUp() {
-  if (curVolume < 255) {
-    curVolume = std::min(static_cast<uint16_t>(curVolume + 10), static_cast<uint16_t>(255));
-    audio.setVolume(map(curVolume, 0, 255, 0, 21));
-    showVolume();
-  }
+  curVolume = std::min(static_cast<uint16_t>(curVolume + 10), static_cast<uint16_t>(255));
+  if (curVolume > 255) curVolume = 255;
+  requestChangeVolume = true;
 }
 
 void volumeDown() {
-  if (curVolume > 0) {
-    curVolume = std::max(static_cast<uint16_t>(curVolume - 10), static_cast<uint16_t>(0));
-    audio.setVolume(map(curVolume, 0, 255, 0, 21));
-    showVolume();
-  }
+  curVolume = std::max(static_cast<uint16_t>(curVolume - 10), static_cast<uint16_t>(0));
+  if (curVolume <= 0) curVolume = 0;
+  requestChangeVolume = true;
 }
 
 bool isMuted = false;
-uint16_t prevVolume = 0; // Guarda o volume antes do mute
+uint16_t prevVolume = 0;
 
 void volumeMute() {
   if (!isMuted) {
@@ -330,8 +353,7 @@ void volumeMute() {
     curVolume = prevVolume;
     isMuted = false;
   }
-  audio.setVolume(map(curVolume, 0, 255, 0, 21));
-  showVolume();
+  requestChangeVolume = true;
 }
 
 void showVolume() {
@@ -347,174 +369,178 @@ void showVolume() {
     if (barWidth < 200) {
       M5Cardputer.Display.fillRect(0, 6, barWidth, barHeight, 0xAAFFAA); // Verde claro
     }
-
-    // Opcional: Exibe valor numérico (ajuste as coordenadas)
-    //M5Cardputer.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-    //M5Cardputer.Display.setCursor(5, 0); // Posição do texto
-    //M5Cardputer.Display.printf("Vol: %d%%", (currentVolume * 100) / 255);
   }
 }
 
 void stationUp() {
   if (numStations > 0) {
-    curStation = (curStation + 1) % numStations; 
-    audio.stopSong();
-    //audio.connecttohost(stations[curStation].url);
-    Playfile();
-    showStation();
+    curStation = (curStation + 1) % numStations;
+    requestReconnect = true;
   }
-  showVolume();
 }
 
 void stationDown() {
   if (numStations > 0) {
     curStation = (curStation - 1 + numStations) % numStations; 
-    audio.stopSong();
-    //audio.connecttohost(stations[curStation].url);
-    Playfile();
-    showStation();
+    requestReconnect = true;
   }
-  showVolume();
 }
 
 void setup() {
+  Serial.begin(115200);
+  g_mutex = xSemaphoreCreateMutex();
+  requestReconnect = true;
+  
   auto cfg = M5.config();
-  auto spk_cfg = M5Cardputer.Speaker.config();
-    /// Increasing the sample_rate will improve the sound quality instead of increasing the CPU load.
-    spk_cfg.sample_rate = 128000; // default:64000 (64kHz)  e.g. 48000 , 50000 , 80000 , 96000 , 100000 , 128000 , 144000 , 192000 , 200000
-    spk_cfg.task_pinned_core = APP_CPU_NUM;
-    M5Cardputer.Speaker.config(spk_cfg);
-  //M5Cardputer.Speaker.setVolume(255);
-  
   M5Cardputer.begin(cfg, true);
-
-  led.begin();
-  led.setBrightness(255);  // Brilho (0-255)
-  led.show();  // Inicializa apagado
-
-  M5Cardputer.Display.setRotation(1);
-  M5Cardputer.Display.setFont(&fonts::FreeMonoOblique9pt7b);
- 
-  connectToWiFi();
   
+  M5Cardputer.Display.begin();
+  M5Cardputer.Display.setRotation(1);
+  M5Cardputer.Display.setFont(&fonts::FreeMono9pt7b);
+
+  auto spk_cfg = M5Cardputer.Speaker.config();
+  /// Increasing the sample_rate will improve the sound quality instead of increasing the CPU load.
+  spk_cfg.sample_rate = 128000; // default:64000 (64kHz)  e.g. 48000 , 50000 , 80000 , 96000 , 100000 , 128000 , 144000 , 192000 , 200000
+  //spk_cfg.task_pinned_core = APP_CPU_NUM;
+  M5Cardputer.Speaker.config(spk_cfg);
+  M5Cardputer.Speaker.begin();
+
   audio.setPinout(I2S_BCK, I2S_WS, I2S_DOUT);
   audio.setVolume(map(curVolume, 0, 255, 0, 21));
   audio.setBalance(0);
+  audio.setBufferSize(8*1024);
+  //audio.setAudioTaskCore(0);
   
-  M5Cardputer.Display.fillScreen(BLACK);  
-  
-  audio.stopSong();
+  connectToWiFi();
+  M5.delay(5);
+  M5Cardputer.Display.clear();
+
   mergeRadioStations();
-  //audio.connecttohost(stations[curStation].url);
-  Playfile();
-  showStation();
-  toggleFFT();
+  xTaskCreatePinnedToCore(Task_Audio, "Task_Audio", 20480, NULL, 1, &handleAudioTask, 1); // Core 1
 }
 
 void loop() {
-  audio.loop();
   M5Cardputer.update();
   updateBatteryDisplay(5000);
 
-  if (M5Cardputer.Keyboard.isChange() && (millis() - lastButtonPress > DEBOUNCE_DELAY)) {
-      //M5Cardputer.Speaker.tone(6000, 10);
-    led.setPixelColor(0, led.Color(120, 0, 255));
-    led.show();
+  String station, title, id3title;
 
-    if (M5Cardputer.Keyboard.isKeyPressed(';')) volumeUp();
-    else if (M5Cardputer.Keyboard.isKeyPressed('.')) volumeDown();
-    else if (M5Cardputer.Keyboard.isKeyPressed('m')) volumeMute();
-    else if (M5Cardputer.Keyboard.isKeyPressed('/')) stationUp();
-    else if (M5Cardputer.Keyboard.isKeyPressed(',')) stationDown();
-    else if (M5Cardputer.Keyboard.isKeyPressed('r')) {
-      audio.stopSong();
-      audio.connecttohost(stations[curStation].url);
-      //Playfile();
-    }
-    else if (M5Cardputer.Keyboard.isKeyPressed('p')) {
-      M5Cardputer.Display.fillRect(0, 15, 240, 49, TFT_BLACK);  
-      M5Cardputer.Display.drawString("Los Santos Rock", 0, 15);
-      audio.stopSong();
-      audio.connecttoFS(SD,"/mp3/Los Santos Rock Radio.mp3");
-    }
-    else if (M5Cardputer.Keyboard.isKeyPressed('o')) {
-      M5Cardputer.Display.fillRect(0, 15, 240, 49, TFT_BLACK);  
-      M5Cardputer.Display.drawString("PlayFile", 0, 15);
-      Playfile();
-    }
-    else if (M5Cardputer.Keyboard.isKeyPressed('s')) {
-      audio.stopSong();
-      audio.connecttospeech("Trabalhe em quanto os outros dormem, e você ficará com sono durante o dia.", "pt");
-    }
-    else if (M5Cardputer.Keyboard.isKeyPressed('f')) {
-      toggleFFT();  //tecla 'f' para ativar/desativar FFT
-    }
+  if (xSemaphoreTake(g_mutex, portMAX_DELAY) == pdTRUE) {
+      station = g_stationName;
+      title   = g_streamTitle;
+      id3title = g_id3Title;
+      xSemaphoreGive(g_mutex);
+  }
+
+  if (M5Cardputer.Keyboard.isChange() && (millis() - lastButtonPress > DEBOUNCE_DELAY)) {
+      if (M5Cardputer.Keyboard.isKeyPressed(';')) volumeUp();
+      else if (M5Cardputer.Keyboard.isKeyPressed('.')) volumeDown();
+      else if (M5Cardputer.Keyboard.isKeyPressed('m')) volumeMute();
+      else if (M5Cardputer.Keyboard.isKeyPressed('/')) stationUp();
+      else if (M5Cardputer.Keyboard.isKeyPressed(',')) stationDown();
+      else if (M5Cardputer.Keyboard.isKeyPressed('r')) {
+        requestReconnect = true;
+      }
+      else if (M5Cardputer.Keyboard.isKeyPressed('p')) {
+        M5Cardputer.Display.fillRect(0, 15, 240, 49, TFT_BLACK);  
+        M5Cardputer.Display.drawString("Stop", 0, 15);
+        requestStop = true;
+      }
       else if (M5Cardputer.Keyboard.isKeyPressed('f')) {
-      toggleFFT();  //tecla 'f' para ativar/desativar FFT
-    }
-    
-    lastButtonPress = millis();
-      //char key = M5Cardputer.Keyboard.read();  // Lê a tecla pressionada
-      //M5Cardputer.Display.drawString(String(key), 0, 60);  // Converte char para String e exibe na tela
+        toggleFFT();  //tecla 'f' para ativar/desativar FFT
+      }
+      
+      lastButtonPress = millis();
    }
   
   if (fft_enabled) {
     updateFFT();
-  } else {
-       // M5Cardputer.Display.drawString(strstr(audio_info(info), "HTTP/"), 0, 51);
+  }
+
+  if(infoChanged) {
+    infoChanged = false;
+    //M5Cardputer.Display.startWrite();
+    if(station) {
+      M5Cardputer.Display.fillRect(0, 15, 240, 15, TFT_BLACK);
+      M5Cardputer.Display.drawString(station.c_str(), 0, 15);
+    }
+
+    if(title) {
+      M5Cardputer.Display.fillRect(0, 33, 240, 15, TFT_BLACK);
+      M5Cardputer.Display.drawString(title.c_str(), 0, 33);
+    }
+    if(id3title) M5Cardputer.Display.drawString(id3title.c_str(), 0, 33);
+    //M5Cardputer.Display.endWrite();
   }
   
-  delay(1);
-    led.setPixelColor(0, led.Color(0, 0, 0)); // Azul
-    led.show();  // Inicializa apagado  M5.Leds.show();  // Atualiza o LED
+  showVolume();
+
+  M5.delay(20);
 }
 
-//void audio_info(const char *info){
-//    if (info && strstr(info, "HTTP/1.1 200 OK") == nullptr) {
-//        M5Cardputer.Display.fillRect(0, 15, 240, 15, TFT_BLACK);
-//        M5Cardputer.Display.drawString(strstr(info, "HTTP/"), 0, 15);
-//    }
-//}
+void Task_Audio(void *pvParameters) {
+  int stopCount = 0;
+  while (1) {
+    if(requestChangeVolume) {
+      requestChangeVolume = false;
+      audio.setVolume(map(curVolume, 0, 255, 0, 21));
+    }
+    if(requestStop) {
+      requestStop = false;
+      isAudioPlay = false;
+      audio.stopSong();
+    }
+    if(requestReconnect) {
+      requestReconnect = false;
+      Playfile();
+    }
+    if(isAudioPlay) {
+      if(audio.isRunning()) {
+        stopCount = 0;
+        audio.loop();
+      } else {
+        stopCount++;
+        if(stopCount > 100) {
+          stopCount = 0;
+          isAudioPlay = false;
+          requestReconnect = true;
+        }
+      }
+      vTaskDelay(10 / portTICK_PERIOD_MS);
+    } else {
+      vTaskDelay(20 / portTICK_PERIOD_MS);
+    }
+  }
+}
 
 void audio_showstation(const char *showstation) {
-    if (showstation && *showstation) { // Verifica se a string não é nula e não está vazia
-        char limitedInfo[241];  // 240 caracteres + 1 para o terminador nulo
-        strncpy(limitedInfo, showstation, 24);  // Copia apenas os primeiros 240 caracteres
-        limitedInfo[24] = '\0';  // Garante que a string termine corretamente
-        M5Cardputer.Display.fillRect(0, 15, 240, 15, TFT_BLACK);
-        M5Cardputer.Display.drawString(limitedInfo, 0, 15);
-       fftSimON = true;
-    }
+  if (showstation && *showstation) { // Verifica se a string não é nula e não está vazia
+    String tmp(showstation);
+    xSemaphoreTake(g_mutex, portMAX_DELAY);
+    fftSimON = true;
+    g_stationName = tmp;
+    infoChanged = true;
+    xSemaphoreGive(g_mutex);
+  }
 }
 
 void audio_showstreamtitle(const char *info) {
-  static int xOffset = 0;                  // Posição horizontal do texto
-  static unsigned long lastUpdate = 0;     // Controle de tempo
-  const int updateInterval = 100;          // Velocidade da rolagem (ms)
-
   if (info && *info) { 
-    int textWidth = M5Cardputer.Display.textWidth(info);  // Largura do texto
+    String tmp(info);
+    xSemaphoreTake(g_mutex, portMAX_DELAY);
+    g_streamTitle = tmp;
+    infoChanged = true;
+    xSemaphoreGive(g_mutex);
+  }
+}
 
-    // Se o texto for maior que a tela, aplicamos a rolagem
-    if (textWidth > 21) {
-      if (millis() - lastUpdate > updateInterval) {
-        lastUpdate = millis();
-        xOffset--;  // Move o texto para a esquerda
-        // Quando o texto sair totalmente, reinicia a posição
-        if (xOffset < -textWidth) {
-          xOffset = 21;
-        }
-      }
-    } else {
-      xOffset = 0;  // Mantém o texto fixo se for menor que 240 pixels
-    }
-
-    // Limpa a área do texto
-    M5Cardputer.Display.fillRect(0, 33, 240, 15, TFT_BLACK);
-    // Desenha o texto na posição atual
-    M5Cardputer.Display.drawString(info, xOffset, 33);
-    // Linha vermelha decorativa
-    M5Cardputer.Display.fillRect(0, 50, 240, 1, TFT_RED);
+void audio_id3data(const char *info){
+  if (info && *info) { 
+    String tmp(info);
+    xSemaphoreTake(g_mutex, portMAX_DELAY);
+    g_id3Title = tmp;
+    infoChanged = true;
+    xSemaphoreGive(g_mutex);
   }
 }
 
