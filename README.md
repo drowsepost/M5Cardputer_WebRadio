@@ -1,5 +1,13 @@
+This project is for my own learning purposes.
+I modified the original data to make use of the Cardputer Adv's headphone jack.
+The modifications I made are as follows:
 
-# M5Cardputer_WebRadio
+- Supports CardputerAdv
+- Stabilizes playback processing by separating tasks
+- Adds automatic recovery function when communication is lost
+- Press P to stop, R to reconnect
+
+# M5Cardputer_WebRadio for Cardputer Adv
 
 M5Cardputer_WebRadio baseado nas bibliotecas: 
 
